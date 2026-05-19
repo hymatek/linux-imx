@@ -619,7 +619,6 @@ static int at24_probe(struct i2c_client *client)
 	bool full_power;
 	struct regmap *regmap;
 	bool writable;
-	u8 test_byte;
 	int err;
 
 	i2c_fn_i2c = i2c_check_functionality(client->adapter, I2C_FUNC_I2C);
@@ -780,21 +779,6 @@ static int at24_probe(struct i2c_client *client)
 		pm_runtime_set_active(dev);
 	}
 	pm_runtime_enable(dev);
-
-	/*
-	 * Perform a one-byte test read to verify that the chip is functional,
-	 * unless powering on the device is to be avoided during probe (i.e.
-	 * it's powered off right now).
-	 */
-	if (full_power) {
-		err = at24_read(at24, 0, &test_byte, 1);
-		if (err) {
-			pm_runtime_disable(dev);
-			if (!pm_runtime_status_suspended(dev))
-				regulator_disable(at24->vcc_reg);
-			return -ENODEV;
-		}
-	}
 
 	at24->nvmem = devm_nvmem_register(dev, &nvmem_config);
 	if (IS_ERR(at24->nvmem)) {
