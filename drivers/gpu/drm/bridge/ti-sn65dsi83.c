@@ -112,6 +112,22 @@
 #define REG_VID_CHA_HORIZONTAL_FRONT_PORCH	0x38
 #define REG_VID_CHA_VERTICAL_FRONT_PORCH	0x3a
 #define REG_VID_CHA_TEST_PATTERN		0x3c
+
+/* Channel B video timing registers (for dual-link / sn65dsi84/85). */
+#define REG_VID_CHB_ACTIVE_LINE_LENGTH_LOW	0x22
+#define REG_VID_CHB_ACTIVE_LINE_LENGTH_HIGH	0x23
+#define REG_VID_CHB_VERTICAL_DISPLAY_SIZE_LOW	0x26
+#define REG_VID_CHB_VERTICAL_DISPLAY_SIZE_HIGH	0x27
+#define REG_VID_CHB_SYNC_DELAY_LOW		0x2a
+#define REG_VID_CHB_SYNC_DELAY_HIGH		0x2b
+#define REG_VID_CHB_HSYNC_PULSE_WIDTH_LOW	0x2e
+#define REG_VID_CHB_HSYNC_PULSE_WIDTH_HIGH	0x2f
+#define REG_VID_CHB_VSYNC_PULSE_WIDTH_LOW	0x32
+#define REG_VID_CHB_VSYNC_PULSE_WIDTH_HIGH	0x33
+#define REG_VID_CHB_HORIZONTAL_BACK_PORCH	0x35
+#define REG_VID_CHB_VERTICAL_BACK_PORCH		0x37
+#define REG_VID_CHB_HORIZONTAL_FRONT_PORCH	0x39
+#define REG_VID_CHB_VERTICAL_FRONT_PORCH	0x3b
 /* IRQ registers */
 #define REG_IRQ_GLOBAL				0xe0
 #define  REG_IRQ_GLOBAL_IRQ_EN			BIT(0)
@@ -188,6 +204,7 @@ static const struct regmap_range sn65dsi83_readable_ranges[] = {
 	regmap_reg_range(REG_VID_CHA_VERTICAL_FRONT_PORCH,
 			 REG_VID_CHA_VERTICAL_FRONT_PORCH),
 	regmap_reg_range(REG_VID_CHA_TEST_PATTERN, REG_VID_CHA_TEST_PATTERN),
+	regmap_reg_range(REG_VID_CHB_ACTIVE_LINE_LENGTH_LOW, REG_VID_CHB_VERTICAL_FRONT_PORCH),
 	regmap_reg_range(REG_IRQ_GLOBAL, REG_IRQ_EN),
 	regmap_reg_range(REG_IRQ_STAT, REG_IRQ_STAT),
 };
@@ -221,6 +238,7 @@ static const struct regmap_range sn65dsi83_writeable_ranges[] = {
 	regmap_reg_range(REG_VID_CHA_VERTICAL_FRONT_PORCH,
 			 REG_VID_CHA_VERTICAL_FRONT_PORCH),
 	regmap_reg_range(REG_VID_CHA_TEST_PATTERN, REG_VID_CHA_TEST_PATTERN),
+	regmap_reg_range(REG_VID_CHB_ACTIVE_LINE_LENGTH_LOW, REG_VID_CHB_VERTICAL_FRONT_PORCH),
 	regmap_reg_range(REG_IRQ_GLOBAL, REG_IRQ_EN),
 	regmap_reg_range(REG_IRQ_STAT, REG_IRQ_STAT),
 };
@@ -509,6 +527,36 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	regmap_write(ctx->regmap, REG_VID_CHA_VERTICAL_FRONT_PORCH,
 		     mode->vsync_start - mode->vdisplay);
 	regmap_write(ctx->regmap, REG_VID_CHA_TEST_PATTERN, 0x00);
+
+	/*
+	 * In dual-link mode, mirror the same timings to channel B. Without this
+	 * the CHB registers stay at zero which the chip interprets as "channel B
+	 * muted", leaving only the left half of a dual-link panel driven.
+	 */
+	if (ctx->lvds_dual_link) {
+		le16val = cpu_to_le16(mode->hdisplay);
+		regmap_bulk_write(ctx->regmap, REG_VID_CHB_ACTIVE_LINE_LENGTH_LOW,
+				  &le16val, 2);
+		le16val = cpu_to_le16(mode->vdisplay);
+		regmap_bulk_write(ctx->regmap, REG_VID_CHB_VERTICAL_DISPLAY_SIZE_LOW,
+				  &le16val, 2);
+		le16val = cpu_to_le16(32 + 1);
+		regmap_bulk_write(ctx->regmap, REG_VID_CHB_SYNC_DELAY_LOW, &le16val, 2);
+		le16val = cpu_to_le16(mode->hsync_end - mode->hsync_start);
+		regmap_bulk_write(ctx->regmap, REG_VID_CHB_HSYNC_PULSE_WIDTH_LOW,
+				  &le16val, 2);
+		le16val = cpu_to_le16(mode->vsync_end - mode->vsync_start);
+		regmap_bulk_write(ctx->regmap, REG_VID_CHB_VSYNC_PULSE_WIDTH_LOW,
+				  &le16val, 2);
+		regmap_write(ctx->regmap, REG_VID_CHB_HORIZONTAL_BACK_PORCH,
+			     mode->htotal - mode->hsync_end);
+		regmap_write(ctx->regmap, REG_VID_CHB_VERTICAL_BACK_PORCH,
+			     mode->vtotal - mode->vsync_end);
+		regmap_write(ctx->regmap, REG_VID_CHB_HORIZONTAL_FRONT_PORCH,
+			     mode->hsync_start - mode->hdisplay);
+		regmap_write(ctx->regmap, REG_VID_CHB_VERTICAL_FRONT_PORCH,
+			     mode->vsync_start - mode->vdisplay);
+	}
 
 	/* Enable PLL */
 	regmap_write(ctx->regmap, REG_RC_PLL_EN, REG_RC_PLL_EN_PLL_EN);
