@@ -453,12 +453,19 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	regmap_write(ctx->regmap, REG_RC_DSI_CLK,
 		     REG_RC_DSI_CLK_DSI_CLK_DIVIDER(sn65dsi83_get_dsi_div(ctx)));
 
-	/* Set number of DSI lanes and LVDS link config. */
+	/* Set number of DSI lanes and LVDS link config.
+	 * For SN65DSI85 dual-link mode, the DSI input is split across both
+	 * LVDS channels; use DSI_CHANNEL_MODE_DUAL (bits 7..5 = 0) and
+	 * mirror the CHA lane count to CHB so the chip properly drives both
+	 * LVDS channels from one DSI input.
+	 */
 	regmap_write(ctx->regmap, REG_DSI_LANE,
-		     REG_DSI_LANE_DSI_CHANNEL_MODE_SINGLE |
+		     (ctx->lvds_dual_link ? 0 :
+		      REG_DSI_LANE_DSI_CHANNEL_MODE_SINGLE) |
 		     REG_DSI_LANE_CHA_DSI_LANES(~(ctx->dsi->lanes - 1)) |
-		     /* CHB is DSI85-only, set to default on DSI83/DSI84 */
-		     REG_DSI_LANE_CHB_DSI_LANES(3));
+		     (ctx->lvds_dual_link ?
+		      REG_DSI_LANE_CHB_DSI_LANES(~(ctx->dsi->lanes - 1)) :
+		      REG_DSI_LANE_CHB_DSI_LANES(3)));
 	/* No equalization. */
 	regmap_write(ctx->regmap, REG_DSI_EQ, 0x00);
 
