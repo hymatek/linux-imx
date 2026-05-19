@@ -427,11 +427,19 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	/* No equalization. */
 	regmap_write(ctx->regmap, REG_DSI_EQ, 0x00);
 
-	/* Set up sync signal polarity. */
-	val = (mode->flags & DRM_MODE_FLAG_NHSYNC ?
-	       REG_LVDS_FMT_HS_NEG_POLARITY : 0) |
-	      (mode->flags & DRM_MODE_FLAG_NVSYNC ?
-	       REG_LVDS_FMT_VS_NEG_POLARITY : 0);
+	/*
+	 * Set up LVDS sync polarity. Prefer the displayconfig table values
+	 * passed via f_sn65dsi8x_{hs,vs}_neg, since on i.MX8MM the Samsung
+	 * DSIM atomic_check forces NHSYNC|NVSYNC in the adjusted mode to
+	 * compensate for LCDIF-to-DSIM glue polarity inversion, which
+	 * corrupts mode->flags for downstream bridges.
+	 */
+	val = (f_sn65dsi8x_hs_neg > 0 ? REG_LVDS_FMT_HS_NEG_POLARITY :
+	       f_sn65dsi8x_hs_neg < 0 ? (mode->flags & DRM_MODE_FLAG_NHSYNC ?
+	       REG_LVDS_FMT_HS_NEG_POLARITY : 0) : 0) |
+	      (f_sn65dsi8x_vs_neg > 0 ? REG_LVDS_FMT_VS_NEG_POLARITY :
+	       f_sn65dsi8x_vs_neg < 0 ? (mode->flags & DRM_MODE_FLAG_NVSYNC ?
+	       REG_LVDS_FMT_VS_NEG_POLARITY : 0) : 0);
 
 	/* Set up bits-per-pixel, 18bpp or 24bpp. */
 	if (lvds_format_24bpp) {
