@@ -167,6 +167,20 @@ bool static_key_initialized __read_mostly;
 EXPORT_SYMBOL_GPL(static_key_initialized);
 
 /*
+ * Export the hw_dispid for display panel identification from cmdline
+ */
+int hw_dispid = 0xFFFF;
+EXPORT_SYMBOL(hw_dispid);
+
+static int __init getdispid(char* str)
+{
+  hw_dispid = simple_strtol(str, NULL, 0);
+  return 1;
+}
+
+__setup("hw_dispid=", getdispid);
+
+/*
  * If set, this is an indication to the drivers that reset the underlying
  * device before going ahead with the initialization otherwise driver might
  * rely on the BIOS and skip the reset operation.
