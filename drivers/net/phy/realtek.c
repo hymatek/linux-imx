@@ -342,6 +342,9 @@ static int rtl8211_config_aneg(struct phy_device *phydev)
 		phy_write(phydev, 0x0e, 0x0000);
 	}
 
+	/* Set default LED cfg */
+	phy_modify_paged(phydev, 0xd04, 0x201b, 0xffff, 0x10);	
+	
 	return 0;
 }
 
