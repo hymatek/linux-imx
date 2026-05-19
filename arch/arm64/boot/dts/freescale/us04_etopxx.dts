@@ -114,7 +114,7 @@
 		assigned-clock-parents = <&clk IMX8MM_SYS_PLL2_500M>;
 		fsl,usbphy = <&usbphynop1>;
 		fsl,usbmisc = <&usbmisc1 0>;
-		power-domains = <&usb_otg1_pd>;
+		power-domains = <&pgc_otg1>;
 		
 		dr_mode = "host";
 		vbus-supply = <&reg_usb1_otg_vbus>;
