@@ -147,6 +147,7 @@ struct sn65dsi83 {
 	struct regulator		*vcc;
 	bool				lvds_dual_link;
 	bool				lvds_dual_link_even_odd_swap;
+	struct gpio_desc		*envdd_gpio;
 };
 
 static const struct regmap_range sn65dsi83_readable_ranges[] = {
@@ -345,8 +346,11 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	}
 
 	/* Deassert reset */
+	gpiod_set_value_cansleep(ctx->enable_gpio, 0);
+	gpiod_set_value_cansleep(ctx->envdd_gpio, 1);
+	usleep_range(20000, 22000);
 	gpiod_set_value_cansleep(ctx->enable_gpio, 1);
-	usleep_range(10000, 11000);
+	usleep_range(20000, 22000);
 
 	/* Get the LVDS format from the bridge state. */
 	bridge_state = drm_atomic_get_new_bridge_state(state, bridge);
@@ -693,6 +697,11 @@ static int sn65dsi83_probe(struct i2c_client *client)
 						   GPIOD_OUT_LOW);
 	if (IS_ERR(ctx->enable_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->enable_gpio), "failed to get enable GPIO\n");
+
+	ctx->envdd_gpio = devm_gpiod_get(ctx->dev, "envdd",
+							GPIOD_OUT_LOW);
+	if (IS_ERR(ctx->envdd_gpio))
+		return dev_err_probe(dev, PTR_ERR(ctx->envdd_gpio), "failed to get envdd GPIO\n");	
 
 	usleep_range(10000, 11000);
 
