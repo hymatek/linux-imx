@@ -34,12 +34,119 @@
 #include <video/display_timing.h>
 #include <video/of_display_timing.h>
 #include <video/videomode.h>
+#include <video/displayconfig.h>
 
 #include <drm/drm_crtc.h>
 #include <drm/drm_device.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_panel.h>
+
+/*----------------------------------------------------------------------------------------------------------------*
+   Helper functions to retrieve the display id value, when passed from the cmdline, and use it to set the
+   display parameters/timings (the contents of the DTB file are overridden, if a valid display id is passed from
+   cmdline.
+ *----------------------------------------------------------------------------------------------------------------*/
+extern int hw_dispid; //This is an exported variable holding the display id value, if passed from cmdline
+
+static const unsigned long avail_pclk_Khz[] = { //List of available LVDS pixel clock frequencies
+	133200, 88500, 76000, 75000, 66600, 62600, 51000, 33200, 30000
+};
+
+int dispid_get_videomode(struct videomode* vm, int dispid)
+{
+	int i=0, di;
+	unsigned long min_err, err;
+	unsigned long target_pclk;
+	unsigned long eff_pclk;
+#ifdef CONFIG_DRM_TI_SN65DSI83
+	extern int volatile f_sn65dsi84_dual_lvds;
+	extern int volatile f_sn65dsi8x_hs_neg;
+	extern int volatile f_sn65dsi8x_vs_neg;
+	unsigned long frefresh;
+#endif
+
+	// Scan the display array to search for the required dispid
+	if(dispid == NODISPLAY)
+		return -1;
+
+	while((displayconfig[i].dispid != NODISPLAY) && (displayconfig[i].dispid != dispid))
+		i++;
+
+	if(displayconfig[i].dispid == NODISPLAY)
+		return -1;
+
+	// Save the displayconfig index before i gets reused below
+	di = i;
+
+	// If we are here, we have a valid array index pointing to the desired display
+	vm->hactive         = displayconfig[di].rezx;
+	vm->hback_porch  = displayconfig[di].hs_bp;
+	vm->hfront_porch = displayconfig[di].hs_fp;
+	vm->hsync_len    = displayconfig[di].hs_w;
+
+	vm->vactive         = displayconfig[di].rezy;
+	vm->vback_porch = displayconfig[di].vs_bp;
+	vm->vfront_porch = displayconfig[di].vs_fp;
+	vm->vsync_len    = displayconfig[di].vs_w;
+
+	//Search the nearest available pixel clock frequency value
+	min_err = 999999;
+	target_pclk = displayconfig[di].pclk_freq;
+#ifdef CONFIG_DRM_TI_SN65DSI83
+	//Check for dual LVDS link, based on frefresh
+	frefresh = (1000 * target_pclk) / ((vm->hactive)*(vm->vactive));
+	if(frefresh < 40)
+	{
+		f_sn65dsi84_dual_lvds = 1;
+		target_pclk *= 2;
+	}
+	// Pass sync polarity to the bridge driver (bypasses DSIM mode flag override)
+	f_sn65dsi8x_hs_neg = displayconfig[di].hs_inv;
+	f_sn65dsi8x_vs_neg = displayconfig[di].vs_inv;
+#endif
+	for (i = 0; i < ARRAY_SIZE(avail_pclk_Khz); i++)
+	{
+		err = abs(avail_pclk_Khz[i] - target_pclk);
+		if(err < min_err)
+		{
+			min_err=err;
+			eff_pclk = avail_pclk_Khz[i];
+		}
+	}
+	vm->pixelclock = 1000 * eff_pclk;
+
+	// Clamp min val of hsync_len (but not in the case of hbp+hsw=88 which is
+	// the special value required by the EK79202 controller, so we need to left it untouched)
+	if((vm->hsync_len + vm->hback_porch) != 88)
+	{
+		if(vm->hsync_len < 8)
+			vm->hsync_len = 8;
+	}
+
+	vm->flags = 0;
+	if(displayconfig[di].hs_inv == 0)
+		vm->flags |= DISPLAY_FLAGS_HSYNC_HIGH;
+	else
+		vm->flags |= DISPLAY_FLAGS_HSYNC_LOW;
+
+	if(displayconfig[di].vs_inv == 0)
+		vm->flags |= DISPLAY_FLAGS_VSYNC_HIGH;
+	else
+		vm->flags |= DISPLAY_FLAGS_VSYNC_LOW;
+
+	if(displayconfig[di].blank_inv == 0)
+		vm->flags |= DISPLAY_FLAGS_DE_HIGH;
+	else
+		vm->flags |= DISPLAY_FLAGS_DE_LOW;
+
+	if(displayconfig[di].pclk_inv == 0)
+		vm->flags |= DISPLAY_FLAGS_PIXDATA_POSEDGE;
+	else
+		vm->flags |= DISPLAY_FLAGS_PIXDATA_NEGEDGE;
+
+	return 0;
+}
 
 /**
  * struct panel_desc - Describes a simple panel.
@@ -511,7 +618,6 @@ static void panel_simple_parse_panel_timing_node(struct device *dev,
 {
 	const struct panel_desc *desc = panel->desc;
 	struct videomode vm;
-	unsigned int i;
 
 	if (WARN_ON(desc->num_modes)) {
 		dev_err(dev, "Reject override mode: panel has a fixed mode\n");
@@ -522,28 +628,16 @@ static void panel_simple_parse_panel_timing_node(struct device *dev,
 		return;
 	}
 
-	for (i = 0; i < panel->desc->num_timings; i++) {
-		const struct display_timing *dt = &panel->desc->timings[i];
+	/* Do not check the override mode against the fallback mode: the override mode, if defined, always takes the precedence
+	 */
+	videomode_from_timing(ot, &vm);
 
-		if (!PANEL_SIMPLE_BOUNDS_CHECK(ot, dt, hactive) ||
-		    !PANEL_SIMPLE_BOUNDS_CHECK(ot, dt, hfront_porch) ||
-		    !PANEL_SIMPLE_BOUNDS_CHECK(ot, dt, hback_porch) ||
-		    !PANEL_SIMPLE_BOUNDS_CHECK(ot, dt, hsync_len) ||
-		    !PANEL_SIMPLE_BOUNDS_CHECK(ot, dt, vactive) ||
-		    !PANEL_SIMPLE_BOUNDS_CHECK(ot, dt, vfront_porch) ||
-		    !PANEL_SIMPLE_BOUNDS_CHECK(ot, dt, vback_porch) ||
-		    !PANEL_SIMPLE_BOUNDS_CHECK(ot, dt, vsync_len))
-			continue;
+	//In case of LVDS display, if a valid hw_dispid is passed from cmdline, the corresponding video mode takes the precedence over the devicetree.
+	if((desc->num_timings==1) && (desc->connector_type == DRM_MODE_CONNECTOR_LVDS))
+		dispid_get_videomode(&vm, hw_dispid);
 
-		if (ot->flags != dt->flags)
-			continue;
-
-		videomode_from_timing(ot, &vm);
-		drm_display_mode_from_videomode(&vm, &panel->override_mode);
-		panel->override_mode.type |= DRM_MODE_TYPE_DRIVER |
-					     DRM_MODE_TYPE_PREFERRED;
-		break;
-	}
+	drm_display_mode_from_videomode(&vm, &panel->override_mode);
+	panel->override_mode.type |= DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
 
 	if (WARN_ON(!panel->override_mode.type))
 		dev_err(dev, "Reject override mode: No display_timing found\n");
@@ -4183,8 +4277,37 @@ static const struct panel_desc arm_rtsm = {
 	.bus_format = MEDIA_BUS_FMT_RGB888_1X24,
 };
 
+static const struct display_timing ex_lvds_panel_fallback_timing = {
+	.pixelclock = { 75000000, 75000000, 75000000 },
+	.hactive = { 1280, 1280, 1280 },
+	.hfront_porch = { 48, 48, 48 },
+	.hback_porch = { 80, 80, 80 },
+	.hsync_len = { 32, 32, 32 },
+	.vactive = { 800, 800, 800 },
+	.vfront_porch = { 3, 3, 3 },
+	.vback_porch = { 14, 14, 14 },
+	.vsync_len = { 6, 6, 6 },
+	.flags = DISPLAY_FLAGS_HSYNC_HIGH | DISPLAY_FLAGS_VSYNC_HIGH |
+		DISPLAY_FLAGS_DE_LOW
+};
+
+static const struct panel_desc ex_lvds_panel = {
+	.timings = &ex_lvds_panel_fallback_timing,
+	.num_timings = 1,
+	.bpc = 8,
+	.size = {
+		.width = 1280,
+		.height = 800,
+	},
+	.bus_format = MEDIA_BUS_FMT_RGB888_1X7X4_SPWG,
+	.connector_type = DRM_MODE_CONNECTOR_LVDS,
+};
+
 static const struct of_device_id platform_of_match[] = {
 	{
+		.compatible = "ex,lvds-panel",
+		.data = &ex_lvds_panel,
+	}, {
 		.compatible = "ampire,am-1280800n3tzqw-t00h",
 		.data = &ampire_am_1280800n3tzqw_t00h,
 	}, {

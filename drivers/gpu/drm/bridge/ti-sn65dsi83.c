@@ -132,6 +132,19 @@
 #define  REG_IRQ_STAT_CHA_SOT_BIT_ERR		BIT(2)
 #define  REG_IRQ_STAT_CHA_PLL_UNLOCK		BIT(0)
 
+int volatile f_sn65dsi84_dual_lvds = 0;
+EXPORT_SYMBOL(f_sn65dsi84_dual_lvds);
+
+/* Sync polarity flags set by panel driver from displayconfig table.
+ * These bypass the Samsung DSIM's mode flag override on i.MX8MM which
+ * corrupts the CRTC adjusted_mode sync polarity for downstream bridges.
+ * -1 = not set (use mode->flags), 0 = active high, 1 = active low.
+ */
+int volatile f_sn65dsi8x_hs_neg = -1;
+int volatile f_sn65dsi8x_vs_neg = -1;
+EXPORT_SYMBOL(f_sn65dsi8x_hs_neg);
+EXPORT_SYMBOL(f_sn65dsi8x_vs_neg);
+
 enum sn65dsi83_model {
 	MODEL_SN65DSI83,
 	MODEL_SN65DSI84,
@@ -605,6 +618,12 @@ static int sn65dsi83_parse_dt(struct sn65dsi83 *ctx, enum sn65dsi83_model model)
 			ctx->lvds_dual_link = true;
 			/* Even pixels to LVDS Channel A, odd pixels to B */
 			ctx->lvds_dual_link_even_odd_swap = true;
+		}
+
+		if(f_sn65dsi84_dual_lvds)
+		{
+			ctx->lvds_dual_link = true;
+			ctx->lvds_dual_link_even_odd_swap = false;
 		}
 	}
 
