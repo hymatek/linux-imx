@@ -946,6 +946,19 @@ static int samsung_dsim_init_link(struct samsung_dsim *dsi)
 	reg = DSIM_BTA_TIMEOUT(0xff) | DSIM_LPDR_TIMEOUT(0xffff);
 	samsung_dsim_write(dsi, DSIM_TIMEOUT_REG, reg);
 
+	/*
+	 * On i.MX variants the register at offset 0x08 is RGB_STATUS, with
+	 * BIT(31) (CMDMODE_INSEL) selecting the input source for the DPI:
+	 * 0 = video stream from LCDIF, 1 = command FIFO. NXP's sec-dsim driver
+	 * explicitly clears this bit when entering video mode; mainline
+	 * samsung-dsim never touches the register, so on hardware whose reset
+	 * default is 1 the LCDIF stream is silently discarded and the bridge
+	 * receives only blanking/sync packets. The same enum slot is mapped to
+	 * CLKCTRL on Exynos, so gate this write to non-Exynos types.
+	 */
+	if (!samsung_dsim_hw_is_exynos(dsi->plat_data->hw_type))
+		writel(0, dsi->reg_base + 0x08);
+
 	return 0;
 }
 
@@ -969,7 +982,15 @@ static void samsung_dsim_set_display_mode(struct samsung_dsim *dsi)
 		dev_dbg(dsi->dev, "calculated hfp: %u, hbp: %u, hsa: %u",
 			hfp, hbp, hsa);
 
-		reg = DSIM_CMD_ALLOW(0xf)
+		/*
+		 * CMD_ALLOW limits when escape-mode commands may be inserted
+		 * into the video stream. NXP's sec-dsim sets it to 0 (commands
+		 * only allowed in BLLP), which matches what the bridge expects
+		 * for clean video. Mainline samsung-dsim used 0xf which lets
+		 * commands disrupt the stream at any horizontal position and
+		 * has been observed to silently break video on SN65DSI8x.
+		 */
+		reg = DSIM_CMD_ALLOW(0x0)
 			| DSIM_STABLE_VFP(m->vsync_start - m->vdisplay)
 			| DSIM_MAIN_VBP(m->vtotal - m->vsync_end);
 		samsung_dsim_write(dsi, DSIM_MVPORCH_REG, reg);
