@@ -713,17 +713,17 @@ static struct t_DisplayParams displayconfig[] = {
         .bpp       = 24,
         
         .pclk_freq = 72000,  // DUAL LVDS dispaly: this is the freq. of one single channel
-        .pclk_inv  = 1,			 //27.03.2017 inverted clock polarity due to IMX.6 bug
+        .pclk_inv  = 0,			 //iMX8MM: DSIM glue already inverts; do not double-invert
         
         .hs_fp     = 40, 
         .hs_bp     = 40, 
         .hs_w      = 120, 
-        .hs_inv    = 0,
+        .hs_inv    = 1,			 //G215HVN01 datasheet: HSYNC active LOW
         
         .vs_fp     = 5, 
         .vs_bp     = 5, 
         .vs_w      = 30, 
-        .vs_inv    = 0,
+        .vs_inv    = 1,			 //G215HVN01 datasheet: VSYNC active LOW
         
         .blank_inv      = 0,
         

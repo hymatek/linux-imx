@@ -337,7 +337,7 @@ static u8 sn65dsi83_get_dsi_range(struct sn65dsi83 *ctx,
 	 */
 	return DIV_ROUND_UP(clamp((unsigned int)mode->clock *
 			    mipi_dsi_pixel_format_to_bpp(ctx->dsi->format) /
-			    ctx->dsi->lanes / 2, 40000U, 500000U), 5000U);
+			    ctx->dsi->lanes / 2, 40000U, 1000000U), 5000U);
 }
 
 static u8 sn65dsi83_get_dsi_div(struct sn65dsi83 *ctx)
