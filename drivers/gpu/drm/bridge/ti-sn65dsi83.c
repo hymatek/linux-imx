@@ -405,6 +405,23 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 	mode = &crtc_state->adjusted_mode;
 
+	/* DIAG: dump chip ID and ctx state before configuring */
+	{
+		unsigned char id[10] = {0};
+		int i;
+		for (i = 0; i < 9; i++) {
+			unsigned int v;
+			if (regmap_read(ctx->regmap, REG_ID(i), &v) == 0)
+				id[i] = (v >= 0x20 && v < 0x7f) ? v : '?';
+			else
+				id[i] = '!';
+		}
+		dev_info(ctx->dev, "DIAG chip_id='%s' dual_link=%d dsi_lanes=%d mode=%dx%d@%d clock=%dkHz flags=0x%x\n",
+			 id, ctx->lvds_dual_link, ctx->dsi ? ctx->dsi->lanes : -1,
+			 mode->hdisplay, mode->vdisplay, drm_mode_vrefresh(mode),
+			 mode->clock, mode->flags);
+	}
+
 	/* Clear reset, disable PLL */
 	regmap_write(ctx->regmap, REG_RC_RESET, 0x00);
 	regmap_write(ctx->regmap, REG_RC_PLL_EN, 0x00);
@@ -528,6 +545,17 @@ static void sn65dsi83_atomic_enable(struct drm_bridge *bridge,
 	regmap_read(ctx->regmap, REG_IRQ_STAT, &pval);
 	if (pval)
 		dev_err(ctx->dev, "Unexpected link status 0x%02x\n", pval);
+
+	/* DIAG: dump key bridge config registers */
+	{
+		unsigned int lvds_fmt = 0, lvds_pll = 0, dsi_clk = 0, dsi_lane = 0;
+		regmap_read(ctx->regmap, REG_LVDS_FMT, &lvds_fmt);
+		regmap_read(ctx->regmap, REG_RC_LVDS_PLL, &lvds_pll);
+		regmap_read(ctx->regmap, REG_DSI_CLK, &dsi_clk);
+		regmap_read(ctx->regmap, REG_DSI_LANE, &dsi_lane);
+		dev_info(ctx->dev, "DIAG post-enable IRQ_STAT=0x%02x LVDS_FMT=0x%02x LVDS_PLL=0x%02x DSI_CLK=0x%02x DSI_LANE=0x%02x\n",
+			 pval, lvds_fmt, lvds_pll, dsi_clk, dsi_lane);
+	}
 }
 
 static void sn65dsi83_atomic_disable(struct drm_bridge *bridge,
@@ -628,11 +656,26 @@ static int sn65dsi83_parse_dt(struct sn65dsi83 *ctx, enum sn65dsi83_model model)
 			ctx->lvds_dual_link_even_odd_swap = true;
 		}
 
-		if(f_sn65dsi84_dual_lvds)
-		{
-			ctx->lvds_dual_link = true;
-			ctx->lvds_dual_link_even_odd_swap = false;
-		}
+	}
+
+	/*
+	 * Allow the panel driver to force dual-link or single-link via the
+	 * global override flag. Hymatek's eX7xxM family shares one DT
+	 * (imx8mm_us04.dtsi) for all panels, with canonical port@3 +
+	 * dual-lvds-{odd,even}-pixels topology that the bridge driver would
+	 * otherwise interpret as "always dual-link". For single-link panels
+	 * in the family (10.1", 7"), panel-simple keeps f_sn65dsi84_dual_lvds=0
+	 * and we override the DT-derived dual-link to force single-link.
+	 */
+	if (f_sn65dsi84_dual_lvds) {
+		dev_info(dev, "DUAL LVDS forced by panel driver (model=%d)\n",
+			 model);
+		ctx->lvds_dual_link = true;
+		ctx->lvds_dual_link_even_odd_swap = false;
+	} else if (model != MODEL_SN65DSI83) {
+		dev_info(dev, "Single-link forced (panel driver did not request dual-link)\n");
+		ctx->lvds_dual_link = false;
+		ctx->lvds_dual_link_even_odd_swap = false;
 	}
 
 	panel_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 2, 0);
