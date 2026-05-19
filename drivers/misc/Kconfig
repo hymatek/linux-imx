@@ -589,4 +589,10 @@ source "drivers/misc/cardreader/Kconfig"
 source "drivers/misc/uacce/Kconfig"
 source "drivers/misc/pvpanic/Kconfig"
 source "drivers/misc/mchp_pci1xxxx/Kconfig"
+config WORKING_HOURS
+	tristate "working hours counters (non volatile)"
+	depends on EEPROM_AT24 && BACKLIGHT_PWM
+	help
+	  Say Y to add working hours counters in I2C EEPROM.
+
 endmenu
