@@ -583,7 +583,28 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 			     mode->vsync_start - mode->vdisplay);
 	}
 
-	/* Enable PLL */
+	/*
+	 * PLL enable + poll for lock moved to atomic_enable below.
+	 * Rationale: NXP sec-dsim only starts its DSI link clock in its own
+	 * atomic_enable() callback, while the mainline 6.6 sn65dsi83 driver
+	 * previously enabled the PLL here in atomic_pre_enable() and polled
+	 * for lock. With sec-dsim upstream there is no DSI link clock yet at
+	 * pre_enable time, so the PLL never locks and we time out (-110).
+	 * The 5.10 sn65dsi83 driver had this entire enable sequence (including
+	 * PLL enable) in atomic_enable() — by that time sec-dsim's own
+	 * atomic_enable has already programmed and started the DSIM PLL.
+	 * Mirror that behavior here.
+	 */
+}
+
+static void sn65dsi83_atomic_enable(struct drm_bridge *bridge,
+				    struct drm_bridge_state *old_bridge_state)
+{
+	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
+	unsigned int pval;
+	int ret;
+
+	/* Enable PLL (DSI link clock from sec-dsim is up by now). */
 	regmap_write(ctx->regmap, REG_RC_PLL_EN, REG_RC_PLL_EN_PLL_EN);
 	usleep_range(3000, 4000);
 	ret = regmap_read_poll_timeout(ctx->regmap, REG_RC_LVDS_PLL, pval,
@@ -591,7 +612,6 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 				       1000, 100000);
 	if (ret) {
 		dev_err(ctx->dev, "failed to lock PLL, ret=%i\n", ret);
-		/* On failure, disable PLL again and exit. */
 		regmap_write(ctx->regmap, REG_RC_PLL_EN, 0x00);
 		return;
 	}
@@ -601,13 +621,6 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 
 	/* Wait for 10ms after soft reset as specified in datasheet */
 	usleep_range(10000, 12000);
-}
-
-static void sn65dsi83_atomic_enable(struct drm_bridge *bridge,
-				    struct drm_bridge_state *old_bridge_state)
-{
-	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
-	unsigned int pval;
 
 	/* Clear all errors that got asserted during initialization. */
 	regmap_read(ctx->regmap, REG_IRQ_STAT, &pval);
