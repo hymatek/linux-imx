@@ -632,6 +632,14 @@
 	pm-ignore-notify;
 	keep-power-in-suspend;
 	non-removable;
+	/*
+	 * On 6.6 the sdhci-esdhc-imx driver tries HS400ES when the eMMC chip
+	 * advertises support, but the imx8mm-evk style assigned-clocks +
+	 * multi-speed pinctrl setup is not done here, so mmc_select_hs400es
+	 * times out (-110). On 5.10 this was tolerated. Disable HS400/HS400ES
+	 * explicitly; HS200 (200 MHz) is fast enough.
+	 */
+	no-mmc-hs400;
 	status = "okay";
 };
 
