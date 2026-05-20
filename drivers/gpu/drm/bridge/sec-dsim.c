@@ -904,6 +904,17 @@ static void sec_mipi_dsim_set_main_mode(struct sec_mipi_dsim *dsim)
 		hbp_wc = dsim->hpar->hbp_wc;
 	}
 
+#ifdef CONFIG_DRM_TI_SN65DSI83
+	/* Port from linux-us03 5.10: TI SN65DSI83/84 reports CHA_SYNCH_ERR
+	 * when the DSI byte-count blanking values don't match the bridge's
+	 * pixel-domain timing. us03 sidestepped this by forcing minimum byte
+	 * counts so the bridge accepts whatever pixel timing was programmed
+	 * via I2C as authoritative.
+	 */
+	hfp_wc = 1;
+	hbp_wc = 1;
+#endif
+
 	mhporch |= MHPORCH_SET_MAINHFP(hfp_wc) |
 		   MHPORCH_SET_MAINHBP(hbp_wc);
 
@@ -917,6 +928,10 @@ static void sec_mipi_dsim_set_main_mode(struct sec_mipi_dsim *dsim)
 			 wc - MIPI_HSA_PKT_OVERHEAD : vmode->hsync_len;
 	} else
 		hsa_wc = dsim->hpar->hsa_wc;
+
+#ifdef CONFIG_DRM_TI_SN65DSI83
+	hsa_wc = 1;
+#endif
 
 	msync |= MSYNC_SET_MAINVSA(vmode->vsync_len) |
 		 MSYNC_SET_MAINHSA(hsa_wc);
@@ -1087,8 +1102,12 @@ static void sec_mipi_dsim_config_clkctrl(struct sec_mipi_dsim *dsim)
 
 	clkctrl |= CLKCTRL_TXREQUESTHSCLK;
 
-	/* using 1.5Gbps PHY */
-	clkctrl |= CLKCTRL_DPHY_SEL_1P5G;
+	/* Match linux-us03 5.10 (known-working on this hardware): use 1.0Gbps
+	 * PHY mode. Our DSI bit-rate (pclk*bpp/lanes = 72MHz*24/4 = 432 Mbps
+	 * per lane) sits comfortably in the 1G range. NXP's 6.6 baseline
+	 * hardcoded 1.5G which gave SN65DSI83 CHA_SYNCH_ERR on this panel.
+	 */
+	clkctrl |= CLKCTRL_DPHY_SEL_1G;
 
 	clkctrl |= CLKCTRL_ESCCLKEN;
 
@@ -1350,6 +1369,31 @@ sec_mipi_dsim_bridge_atomic_enable(struct drm_bridge *bridge,
 
 	if (dsim->enabled)
 		return;
+
+	dev_info(dsim->dev, "DIAG sec-dsim atomic_enable running\n");
+
+	/*
+	 * Ensure dsim->vmode is populated. On 6.6 the bridge framework may not
+	 * have called our mode_set callback yet by the time atomic_enable runs
+	 * (in 5.10 it was guaranteed to be called first). Without this,
+	 * sec_mipi_dsim_set_main_mode() writes 0 to MDRESOL/MVPORCH/MHPORCH and
+	 * the DSIM never transmits actual video data — the LVDS bridge sees no
+	 * pixel data and the panel stays black even when the bridge's own test
+	 * pattern works.
+	 */
+	{
+		struct drm_crtc_state *new_crtc_state;
+		new_crtc_state = drm_atomic_get_new_crtc_state(old_state, crtc);
+		dev_info(dsim->dev, "DIAG new_crtc_state=%p hactive=%d vactive=%d\n",
+			 new_crtc_state,
+			 new_crtc_state ? new_crtc_state->adjusted_mode.hdisplay : -1,
+			 new_crtc_state ? new_crtc_state->adjusted_mode.vdisplay : -1);
+		if (new_crtc_state)
+			drm_display_mode_to_videomode(&new_crtc_state->adjusted_mode,
+						      &dsim->vmode);
+		dev_info(dsim->dev, "DIAG vmode hactive=%d vactive=%d\n",
+			 dsim->vmode.hactive, dsim->vmode.vactive);
+	}
 
 	/* config main display mode */
 	sec_mipi_dsim_set_main_mode(dsim);
