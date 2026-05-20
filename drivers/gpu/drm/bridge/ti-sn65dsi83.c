@@ -471,19 +471,21 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	regmap_write(ctx->regmap, REG_RC_DSI_CLK,
 		     REG_RC_DSI_CLK_DSI_CLK_DIVIDER(sn65dsi83_get_dsi_div(ctx)));
 
-	/* Set number of DSI lanes and LVDS link config.
-	 * For SN65DSI85 dual-link mode, the DSI input is split across both
-	 * LVDS channels; use DSI_CHANNEL_MODE_DUAL (bits 7..5 = 0) and
-	 * mirror the CHA lane count to CHB so the chip properly drives both
-	 * LVDS channels from one DSI input.
+	/*
+	 * Set REG_DSI_LANE = DSI_CHANNEL_MODE_SINGLE (bit 5) — even for
+	 * dual-link LVDS, the SN65DSI83/84 (which we use) has a SINGLE DSI
+	 * input; only SN65DSI85 has two DSI inputs and only that chip needs
+	 * the DSI_CHANNEL_MODE_DUAL (bits 7..5 = 0) setting. The previously
+	 * applied patch "0018-sn65dsi83-use-DUAL-channel-mode-for-DSI85"
+	 * conditioned on lvds_dual_link, not on chip model, and broke our
+	 * DSI84 setup (i2c dump showed REG[0x10]=0x00 instead of the working
+	 * 5.10 value 0x26).
 	 */
 	regmap_write(ctx->regmap, REG_DSI_LANE,
-		     (ctx->lvds_dual_link ? 0 :
-		      REG_DSI_LANE_DSI_CHANNEL_MODE_SINGLE) |
+		     REG_DSI_LANE_DSI_CHANNEL_MODE_SINGLE |
 		     REG_DSI_LANE_CHA_DSI_LANES(~(ctx->dsi->lanes - 1)) |
-		     (ctx->lvds_dual_link ?
-		      REG_DSI_LANE_CHB_DSI_LANES(~(ctx->dsi->lanes - 1)) :
-		      REG_DSI_LANE_CHB_DSI_LANES(3)));
+		     /* CHB is DSI85-only, set to default on DSI83/DSI84 */
+		     REG_DSI_LANE_CHB_DSI_LANES(3));
 	/* No equalization. */
 	regmap_write(ctx->regmap, REG_DSI_EQ, 0x00);
 
@@ -814,9 +816,14 @@ static int sn65dsi83_host_attach(struct sn65dsi83 *ctx)
 
 	dsi->lanes = dsi_lanes;
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
-			  MIPI_DSI_MODE_VIDEO_NO_HFP | MIPI_DSI_MODE_VIDEO_NO_HBP |
-			  MIPI_DSI_MODE_VIDEO_NO_HSA | MIPI_DSI_MODE_NO_EOT_PACKET;
+	/*
+	 * 6.6 mainline added VIDEO_NO_HFP|HBP|HSA + NO_EOT_PACKET flags but
+	 * those tell sec-dsim on i.MX8MM to drop the standard horizontal
+	 * blanking packets, which confuses the Innolux G215HVN01 panel
+	 * downstream of the bridge. linux-us03 5.10 uses just VIDEO|BURST
+	 * and the panel locks fine — mirror that.
+	 */
+	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST;
 
 	ret = devm_mipi_dsi_attach(dev, dsi);
 	if (ret < 0) {

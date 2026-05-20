@@ -50,7 +50,16 @@
 extern int hw_dispid; //This is an exported variable holding the display id value, if passed from cmdline
 
 static const unsigned long avail_pclk_Khz[] = { //List of available LVDS pixel clock frequencies
-	148500, 133200, 88500, 76000, 75000, 66600, 62600, 51000, 33200, 30000
+	/*
+	 * 148500 was added in patch 0015 to "exactly hit" CEA 1080p60. With
+	 * the Exor displayconfig 57 timings (66/66/66 h-blanking, 5/5/30
+	 * v-blanking, htotal=2118 vtotal=1120) the actual refresh becomes
+	 * 148500000/(2118*1120) ≈ 62.6 Hz which our Innolux G215HVN01 panel
+	 * doesn't lock onto, even though sn65dsi83 PLL locks. Linux-us03 5.10
+	 * works because its list has no 148500 → snap picks 133200 (56.2 Hz)
+	 * which the panel does accept. Mirror that: keep 148500 out.
+	 */
+	133200, 88500, 76000, 75000, 66600, 62600, 51000, 33200, 30000
 };
 
 int dispid_get_videomode(struct videomode* vm, int dispid)

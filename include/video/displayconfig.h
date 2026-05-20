@@ -713,23 +713,22 @@ static struct t_DisplayParams displayconfig[] = {
         .bpp       = 24,
         
         .pclk_freq = 72000,  // DUAL LVDS dispaly: this is the freq. of one single channel
-        .pclk_inv  = 0,			 //iMX8MM: DSIM glue already inverts; do not double-invert
-        
-        /* Timing values from working Exor mainos boot of this exact panel.
-         * Bridge regs read CHA_HSW=66, CHA_HBP=66, CHA_HFP=66,
-         * CHA_VBP=5, CHA_VSW=30, CHA_VFP=5, LVDS_FMT=0x0c (SPWG,
-         * HS+VS active HIGH). The IMX.6-era values (40/40/120,
-         * vs_inv=1) gave clean DSI sync at the bridge but no visible
-         * LVDS pixel output. */
-        .hs_fp     = 66,
-        .hs_bp     = 66,
-        .hs_w      = 66,
-        .hs_inv    = 0,    //HS active HIGH (Exor working setup)
+        .pclk_inv  = 1,			 // Match linux-us03 5.10 (which works on this exact panel from p2)
+
+        /* Timings MUST match linux-us03 5.10's displayconfig 57 (40/40/120) which
+         * boots and shows this exact panel on p2. We previously set 66/66/66 based
+         * on a misread of register snapshots, but those numbers don't actually drive
+         * the panel — only 40/40/120 does.
+         */
+        .hs_fp     = 40,
+        .hs_bp     = 40,
+        .hs_w      = 120,
+        .hs_inv    = 0,
 
         .vs_fp     = 5,
         .vs_bp     = 5,
         .vs_w      = 30,
-        .vs_inv    = 0,    //VS active HIGH (Exor working setup)
+        .vs_inv    = 0,
         
         .blank_inv      = 0,
         
