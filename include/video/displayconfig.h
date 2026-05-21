@@ -715,14 +715,15 @@ static struct t_DisplayParams displayconfig[] = {
         .pclk_freq = 72000,  // DUAL LVDS dispaly: this is the freq. of one single channel
         .pclk_inv  = 1,			 // Match linux-us03 5.10 (which works on this exact panel from p2)
 
-        /* Timings MUST match linux-us03 5.10's displayconfig 57 (40/40/120) which
-         * boots and shows this exact panel on p2. We previously set 66/66/66 based
-         * on a misread of register snapshots, but those numbers don't actually drive
-         * the panel — only 40/40/120 does.
+        /* Exor's stock 5.10 binary (which displays this panel) actually drives
+         * sn65 with hs_fp=66 hs_bp=66 hs_w=66 (per i2c register snapshot from
+         * a working p2 boot), NOT the 40/40/120 in linux-us03 source. The
+         * panel (Innolux G215HVN01) needs these specific timings — sn65
+         * reports CHA_SYNCH_ERR with 40/40/120.
          */
-        .hs_fp     = 40,
-        .hs_bp     = 40,
-        .hs_w      = 120,
+        .hs_fp     = 66,
+        .hs_bp     = 66,
+        .hs_w      = 66,
         .hs_inv    = 0,
 
         .vs_fp     = 5,
