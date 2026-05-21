@@ -735,7 +735,16 @@
 							<400000000>,
 							<400000000>,
 							<750000000>,
-							<1039500000>,
+							/* IMX8MM_VIDEO_PLL1: 594 MHz matches Exor stock
+							 * 5.10 setup that drives our Innolux G215HVN01
+							 * panel cleanly. /5 gives LCDIF_PIXEL=118.8 MHz
+							 * which is what the panel actually needs.
+							 * NXP's 6.6 default was 1039.5 MHz which only
+							 * permits /7=148.5 (CEA 1080p60) or /8=129.94
+							 * - neither matches the panel timing region
+							 * the SN65DSI83 bridge accepts cleanly.
+							 */
+							<594000000>,
 							<393216000>,
 							<361267200>;
 			};

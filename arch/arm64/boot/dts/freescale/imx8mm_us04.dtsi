@@ -451,22 +451,6 @@
 &mipi_dsi {
 	status = "okay";
 
-	/*
-	 * Expose the LCDIF pixel clock to the DSIM driver as "pixel".
-	 * imx_sec_dsim_encoder_atomic_check() will call clk_round_rate()
-	 * on this and rewrite adjusted_mode->clock to match what CCM can
-	 * actually deliver, so DSIM and the SN65 bridge program their
-	 * PLLs for the real pixel rate (not the requested rate that CCM
-	 * silently rounds). Without this, video_pll1=1039.5MHz + /8 gives
-	 * 129.94 MHz at the panel but DSIM/sn65 expect 133.2 MHz, causing
-	 * SN65DSI83 CHA_SYNCH_ERR.
-	 */
-	clocks = <&clk IMX8MM_CLK_DSI_CORE>,
-		 <&clk IMX8MM_CLK_DSI_PHY_REF>,
-		 <&clk IMX8MM_CLK_DISP_APB_ROOT>,
-		 <&clk IMX8MM_CLK_LCDIF_PIXEL>;
-	clock-names = "cfg", "pll-ref", "apb-root", "pixel";
-
 	port@1 {
 		dsim_to_lvds_bridge: endpoint {
 			remote-endpoint = <&lvds_bridge_in>;

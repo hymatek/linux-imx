@@ -184,32 +184,6 @@ static int imx_sec_dsim_encoder_atomic_check(struct drm_encoder *encoder,
 	struct drm_bridge_state *bridge_state;
 	struct drm_bus_cfg *input_bus_cfg;
 
-	/*
-	 * Round adjusted_mode->clock to the rate CCM can actually deliver
-	 * for the LCDIF pixel clock before we use it to program DSIM/PHY/PLL
-	 * and the downstream SN65DSI83 bridge. The displayconfig snap picks
-	 * a target like 133.2 MHz, but with video_pll1=1039.5 MHz only /7
-	 * (148.5) and /8 (129.94) are reachable; CCM silently picks /8.
-	 * Without this rewrite, DSIM and SN65 program for 133.2 while the
-	 * pixel clock runs at 129.94, and the bridge reports CHA_SYNCH_ERR
-	 * because the measured DSI sync timing doesn't match the programmed
-	 * pixel-domain timing. linux-us03 5.10 dodged this via its own
-	 * lcdif_crtc_mode_valid() rejecting non-exact rates; in 6.6 we
-	 * fold the clock into the mode so the whole chain stays consistent.
-	 */
-	if (dsim_dev->clk_pix) {
-		unsigned long req = adjusted_mode->clock * 1000UL;
-		long rounded = clk_round_rate(dsim_dev->clk_pix, req);
-
-		if (rounded > 0 && rounded != req) {
-			dev_info(dsim_dev->dev,
-				 "rounding pixel clock: %lu Hz -> %ld Hz\n",
-				 req, rounded);
-			adjusted_mode->clock = rounded / 1000;
-			adjusted_mode->crtc_clock = adjusted_mode->clock;
-		}
-	}
-
 	/* check pll out */
 	ret = sec_mipi_dsim_check_pll_out(bridge->driver_private,
 					  adjusted_mode);
