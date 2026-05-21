@@ -1581,4 +1581,39 @@
 		throttle,max_state = <1>;
 		#cooling-cells = <2>;
 	};
+
+	gpu_3d: gpu3d@38000000 {
+		compatible = "vivante,gc";
+		reg = <0x0 0x38000000 0x0 0x8000>;
+		interrupts = <GIC_SPI 3 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&clk IMX8MM_CLK_GPU3D_ROOT>,
+			 <&clk IMX8MM_CLK_GPU3D_CORE>,
+			 <&clk IMX8MM_CLK_GPU3D_CORE>,
+			 <&clk IMX8MM_CLK_GPU_AHB>;
+		clock-names = "bus", "core", "shader", "reg";
+		assigned-clocks = <&clk IMX8MM_CLK_GPU3D_CORE>,
+				  <&clk IMX8MM_CLK_GPU_AXI>,
+				  <&clk IMX8MM_CLK_GPU_AHB>;
+		assigned-clock-parents = <&clk IMX8MM_SYS_PLL1_800M>,
+					 <&clk IMX8MM_SYS_PLL1_800M>,
+					 <&clk IMX8MM_SYS_PLL1_800M>;
+		assigned-clock-rates = <800000000>, <800000000>, <400000000>;
+		power-domains = <&pgc_gpu>;
+		status = "disabled";
+	};
+
+	gpu_2d: gpu2d@38008000 {
+		compatible = "vivante,gc";
+		reg = <0x0 0x38008000 0x0 0x8000>;
+		interrupts = <GIC_SPI 25 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&clk IMX8MM_CLK_GPU2D_ROOT>,
+			 <&clk IMX8MM_CLK_GPU2D_CORE>,
+			 <&clk IMX8MM_CLK_GPU_AHB>;
+		clock-names = "bus", "core", "reg";
+		assigned-clocks = <&clk IMX8MM_CLK_GPU2D_CORE>;
+		assigned-clock-parents = <&clk IMX8MM_SYS_PLL1_800M>;
+		assigned-clock-rates = <800000000>;
+		power-domains = <&pgc_gpu>;
+		status = "disabled";
+	};
 };
