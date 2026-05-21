@@ -31,10 +31,9 @@
 #include <linux/i2c.h>
 #include <linux/media-bus-format.h>
 #include <linux/module.h>
-#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_graph.h>
 #include <linux/regmap.h>
-#include <linux/regulator/consumer.h>
 
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
@@ -112,22 +111,6 @@
 #define REG_VID_CHA_HORIZONTAL_FRONT_PORCH	0x38
 #define REG_VID_CHA_VERTICAL_FRONT_PORCH	0x3a
 #define REG_VID_CHA_TEST_PATTERN		0x3c
-
-/* Channel B video timing registers (for dual-link / sn65dsi84/85). */
-#define REG_VID_CHB_ACTIVE_LINE_LENGTH_LOW	0x22
-#define REG_VID_CHB_ACTIVE_LINE_LENGTH_HIGH	0x23
-#define REG_VID_CHB_VERTICAL_DISPLAY_SIZE_LOW	0x26
-#define REG_VID_CHB_VERTICAL_DISPLAY_SIZE_HIGH	0x27
-#define REG_VID_CHB_SYNC_DELAY_LOW		0x2a
-#define REG_VID_CHB_SYNC_DELAY_HIGH		0x2b
-#define REG_VID_CHB_HSYNC_PULSE_WIDTH_LOW	0x2e
-#define REG_VID_CHB_HSYNC_PULSE_WIDTH_HIGH	0x2f
-#define REG_VID_CHB_VSYNC_PULSE_WIDTH_LOW	0x32
-#define REG_VID_CHB_VSYNC_PULSE_WIDTH_HIGH	0x33
-#define REG_VID_CHB_HORIZONTAL_BACK_PORCH	0x35
-#define REG_VID_CHB_VERTICAL_BACK_PORCH		0x37
-#define REG_VID_CHB_HORIZONTAL_FRONT_PORCH	0x39
-#define REG_VID_CHB_VERTICAL_FRONT_PORCH	0x3b
 /* IRQ registers */
 #define REG_IRQ_GLOBAL				0xe0
 #define  REG_IRQ_GLOBAL_IRQ_EN			BIT(0)
@@ -151,14 +134,12 @@
 int volatile f_sn65dsi84_dual_lvds = 0;
 EXPORT_SYMBOL(f_sn65dsi84_dual_lvds);
 
-/* Sync polarity flags set by panel driver from displayconfig table.
- * These bypass the Samsung DSIM's mode flag override on i.MX8MM which
- * corrupts the CRTC adjusted_mode sync polarity for downstream bridges.
- * -1 = not set (use mode->flags), 0 = active high, 1 = active low.
+/* 6.6 panel-simple patch 0011 references these for displayconfig sync polarity.
+ * 5.10 driver doesn't use them but exports as no-op so the link succeeds.
  */
-int volatile f_sn65dsi8x_hs_neg = -1;
-int volatile f_sn65dsi8x_vs_neg = -1;
+int volatile f_sn65dsi8x_hs_neg = 0;
 EXPORT_SYMBOL(f_sn65dsi8x_hs_neg);
+int volatile f_sn65dsi8x_vs_neg = 0;
 EXPORT_SYMBOL(f_sn65dsi8x_vs_neg);
 
 enum sn65dsi83_model {
@@ -170,10 +151,11 @@ struct sn65dsi83 {
 	struct drm_bridge		bridge;
 	struct device			*dev;
 	struct regmap			*regmap;
+	struct device_node		*host_node;
 	struct mipi_dsi_device		*dsi;
 	struct drm_bridge		*panel_bridge;
 	struct gpio_desc		*enable_gpio;
-	struct regulator		*vcc;
+	int				dsi_lanes;
 	bool				lvds_dual_link;
 	bool				lvds_dual_link_even_odd_swap;
 	struct gpio_desc		*envdd_gpio;
@@ -204,7 +186,6 @@ static const struct regmap_range sn65dsi83_readable_ranges[] = {
 	regmap_reg_range(REG_VID_CHA_VERTICAL_FRONT_PORCH,
 			 REG_VID_CHA_VERTICAL_FRONT_PORCH),
 	regmap_reg_range(REG_VID_CHA_TEST_PATTERN, REG_VID_CHA_TEST_PATTERN),
-	regmap_reg_range(REG_VID_CHB_ACTIVE_LINE_LENGTH_LOW, REG_VID_CHB_VERTICAL_FRONT_PORCH),
 	regmap_reg_range(REG_IRQ_GLOBAL, REG_IRQ_EN),
 	regmap_reg_range(REG_IRQ_STAT, REG_IRQ_STAT),
 };
@@ -238,7 +219,6 @@ static const struct regmap_range sn65dsi83_writeable_ranges[] = {
 	regmap_reg_range(REG_VID_CHA_VERTICAL_FRONT_PORCH,
 			 REG_VID_CHA_VERTICAL_FRONT_PORCH),
 	regmap_reg_range(REG_VID_CHA_TEST_PATTERN, REG_VID_CHA_TEST_PATTERN),
-	regmap_reg_range(REG_VID_CHB_ACTIVE_LINE_LENGTH_LOW, REG_VID_CHB_VERTICAL_FRONT_PORCH),
 	regmap_reg_range(REG_IRQ_GLOBAL, REG_IRQ_EN),
 	regmap_reg_range(REG_IRQ_STAT, REG_IRQ_STAT),
 };
@@ -274,41 +254,64 @@ static struct sn65dsi83 *bridge_to_sn65dsi83(struct drm_bridge *bridge)
 	return container_of(bridge, struct sn65dsi83, bridge);
 }
 
-static int sn65dsi83_host_attach(struct sn65dsi83 *ctx);
-
 static int sn65dsi83_attach(struct drm_bridge *bridge,
 			    enum drm_bridge_attach_flags flags)
 {
 	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
-	int ret;
+	struct device *dev = ctx->dev;
+	struct mipi_dsi_device *dsi;
+	struct mipi_dsi_host *host;
+	int ret = 0;
 
-	/*
-	 * Defer mipi_dsi_attach to here (instead of probe) so that the DSI
-	 * host driver (e.g. sec-dsim) has had a chance to call
-	 * mipi_dsi_host_register and so that sec-dsim's dsim->next is already
-	 * set by the time this bridge's host_attach calls mipi_dsi_attach.
-	 * Matches 5.10 sn65dsi83 driver flow; works around the chicken-and-egg
-	 * with NXP sec-dsim's component-bind ordering on 6.6.
-	 */
-	if (!ctx->dsi) {
-		ret = sn65dsi83_host_attach(ctx);
-		if (ret)
-			return dev_err_probe(ctx->dev, ret,
-					     "failed to attach DSI host\n");
+	const struct mipi_dsi_device_info info = {
+		.type = "sn65dsi83",
+		.channel = 0,
+		.node = NULL,
+	};
+
+	host = of_find_mipi_dsi_host_by_node(ctx->host_node);
+	if (!host) {
+		dev_err(dev, "failed to find dsi host\n");
+		return -EPROBE_DEFER;
+	}
+
+	dsi = mipi_dsi_device_register_full(host, &info);
+	if (IS_ERR(dsi)) {
+		return dev_err_probe(dev, PTR_ERR(dsi),
+				     "failed to create dsi device\n");
+	}
+
+	ctx->dsi = dsi;
+
+	dsi->lanes = ctx->dsi_lanes;
+	dsi->format = MIPI_DSI_FMT_RGB888;
+	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST;
+
+	ret = mipi_dsi_attach(dsi);
+	if (ret < 0) {
+		dev_err(dev, "failed to attach dsi to host\n");
+		goto err_dsi_attach;
 	}
 
 	return drm_bridge_attach(bridge->encoder, ctx->panel_bridge,
 				 &ctx->bridge, flags);
+
+err_dsi_attach:
+	mipi_dsi_device_unregister(dsi);
+	return ret;
 }
 
-static void sn65dsi83_detach(struct drm_bridge *bridge)
+static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
+					struct drm_bridge_state *old_bridge_state)
 {
 	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
 
-	if (!ctx->dsi)
-		return;
-
-	ctx->dsi = NULL;
+	regcache_mark_dirty(ctx->regmap);
+	gpiod_set_value_cansleep(ctx->enable_gpio, 0);
+	gpiod_set_value_cansleep(ctx->envdd_gpio, 1);
+	usleep_range(20000, 22000);
+	gpiod_set_value_cansleep(ctx->enable_gpio, 1);
+	usleep_range(20000, 22000);
 }
 
 static u8 sn65dsi83_get_lvds_range(struct sn65dsi83 *ctx,
@@ -355,7 +358,7 @@ static u8 sn65dsi83_get_dsi_range(struct sn65dsi83 *ctx,
 	 */
 	return DIV_ROUND_UP(clamp((unsigned int)mode->clock *
 			    mipi_dsi_pixel_format_to_bpp(ctx->dsi->format) /
-			    ctx->dsi->lanes / 2, 40000U, 1000000U), 5000U);
+			    ctx->dsi_lanes / 2, 40000U, 500000U), 5000U);
 }
 
 static u8 sn65dsi83_get_dsi_div(struct sn65dsi83 *ctx)
@@ -363,7 +366,7 @@ static u8 sn65dsi83_get_dsi_div(struct sn65dsi83 *ctx)
 	/* The divider is (DSI_CLK / LVDS_CLK) - 1, which really is: */
 	unsigned int dsi_div = mipi_dsi_pixel_format_to_bpp(ctx->dsi->format);
 
-	dsi_div /= ctx->dsi->lanes;
+	dsi_div /= ctx->dsi_lanes;
 
 	if (!ctx->lvds_dual_link)
 		dsi_div /= 2;
@@ -371,8 +374,8 @@ static u8 sn65dsi83_get_dsi_div(struct sn65dsi83 *ctx)
 	return dsi_div - 1;
 }
 
-static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
-					struct drm_bridge_state *old_bridge_state)
+static void sn65dsi83_atomic_enable(struct drm_bridge *bridge,
+				    struct drm_bridge_state *old_bridge_state)
 {
 	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
 	struct drm_atomic_state *state = old_bridge_state->base.state;
@@ -387,19 +390,6 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	__le16 le16val;
 	u16 val;
 	int ret;
-
-	ret = regulator_enable(ctx->vcc);
-	if (ret) {
-		dev_err(ctx->dev, "Failed to enable vcc: %d\n", ret);
-		return;
-	}
-
-	/* Deassert reset */
-	gpiod_set_value_cansleep(ctx->enable_gpio, 0);
-	gpiod_set_value_cansleep(ctx->envdd_gpio, 1);
-	usleep_range(20000, 22000);
-	gpiod_set_value_cansleep(ctx->enable_gpio, 1);
-	usleep_range(20000, 22000);
 
 	/* Get the LVDS format from the bridge state. */
 	bridge_state = drm_atomic_get_new_bridge_state(state, bridge);
@@ -441,23 +431,6 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
 	mode = &crtc_state->adjusted_mode;
 
-	/* DIAG: dump chip ID and ctx state before configuring */
-	{
-		unsigned char id[10] = {0};
-		int i;
-		for (i = 0; i < 9; i++) {
-			unsigned int v;
-			if (regmap_read(ctx->regmap, REG_ID(i), &v) == 0)
-				id[i] = (v >= 0x20 && v < 0x7f) ? v : '?';
-			else
-				id[i] = '!';
-		}
-		dev_info(ctx->dev, "DIAG chip_id='%s' dual_link=%d dsi_lanes=%d mode=%dx%d@%d clock=%dkHz flags=0x%x\n",
-			 id, ctx->lvds_dual_link, ctx->dsi ? ctx->dsi->lanes : -1,
-			 mode->hdisplay, mode->vdisplay, drm_mode_vrefresh(mode),
-			 mode->clock, mode->flags);
-	}
-
 	/* Clear reset, disable PLL */
 	regmap_write(ctx->regmap, REG_RC_RESET, 0x00);
 	regmap_write(ctx->regmap, REG_RC_PLL_EN, 0x00);
@@ -471,37 +444,20 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 	regmap_write(ctx->regmap, REG_RC_DSI_CLK,
 		     REG_RC_DSI_CLK_DSI_CLK_DIVIDER(sn65dsi83_get_dsi_div(ctx)));
 
-	/*
-	 * Set REG_DSI_LANE = DSI_CHANNEL_MODE_SINGLE (bit 5) — even for
-	 * dual-link LVDS, the SN65DSI83/84 (which we use) has a SINGLE DSI
-	 * input; only SN65DSI85 has two DSI inputs and only that chip needs
-	 * the DSI_CHANNEL_MODE_DUAL (bits 7..5 = 0) setting. The previously
-	 * applied patch "0018-sn65dsi83-use-DUAL-channel-mode-for-DSI85"
-	 * conditioned on lvds_dual_link, not on chip model, and broke our
-	 * DSI84 setup (i2c dump showed REG[0x10]=0x00 instead of the working
-	 * 5.10 value 0x26).
-	 */
+	/* Set number of DSI lanes and LVDS link config. */
 	regmap_write(ctx->regmap, REG_DSI_LANE,
 		     REG_DSI_LANE_DSI_CHANNEL_MODE_SINGLE |
-		     REG_DSI_LANE_CHA_DSI_LANES(~(ctx->dsi->lanes - 1)) |
+		     REG_DSI_LANE_CHA_DSI_LANES(~(ctx->dsi_lanes - 1)) |
 		     /* CHB is DSI85-only, set to default on DSI83/DSI84 */
 		     REG_DSI_LANE_CHB_DSI_LANES(3));
 	/* No equalization. */
 	regmap_write(ctx->regmap, REG_DSI_EQ, 0x00);
 
-	/*
-	 * Set up LVDS sync polarity. Prefer the displayconfig table values
-	 * passed via f_sn65dsi8x_{hs,vs}_neg, since on i.MX8MM the Samsung
-	 * DSIM atomic_check forces NHSYNC|NVSYNC in the adjusted mode to
-	 * compensate for LCDIF-to-DSIM glue polarity inversion, which
-	 * corrupts mode->flags for downstream bridges.
-	 */
-	val = (f_sn65dsi8x_hs_neg > 0 ? REG_LVDS_FMT_HS_NEG_POLARITY :
-	       f_sn65dsi8x_hs_neg < 0 ? (mode->flags & DRM_MODE_FLAG_NHSYNC ?
-	       REG_LVDS_FMT_HS_NEG_POLARITY : 0) : 0) |
-	      (f_sn65dsi8x_vs_neg > 0 ? REG_LVDS_FMT_VS_NEG_POLARITY :
-	       f_sn65dsi8x_vs_neg < 0 ? (mode->flags & DRM_MODE_FLAG_NVSYNC ?
-	       REG_LVDS_FMT_VS_NEG_POLARITY : 0) : 0);
+	/* Set up sync signal polarity. */
+	val = (mode->flags & DRM_MODE_FLAG_NHSYNC ?
+	       REG_LVDS_FMT_HS_NEG_POLARITY : 0) |
+	      (mode->flags & DRM_MODE_FLAG_NVSYNC ?
+	       REG_LVDS_FMT_VS_NEG_POLARITY : 0);
 
 	/* Set up bits-per-pixel, 18bpp or 24bpp. */
 	if (lvds_format_24bpp) {
@@ -553,60 +509,13 @@ static void sn65dsi83_atomic_pre_enable(struct drm_bridge *bridge,
 		     mode->hsync_start - mode->hdisplay);
 	regmap_write(ctx->regmap, REG_VID_CHA_VERTICAL_FRONT_PORCH,
 		     mode->vsync_start - mode->vdisplay);
+	/* 5.10 had this at 0x10 (TEST_PATTERN ENABLED) for bring-up; switch to
+	 * 0x00 so we display the actual framebuffer content. The test pattern
+	 * proved the LVDS path works end-to-end on our G215HVN01 panel.
+	 */
 	regmap_write(ctx->regmap, REG_VID_CHA_TEST_PATTERN, 0x00);
 
-	/*
-	 * In dual-link mode, mirror the same timings to channel B. Without this
-	 * the CHB registers stay at zero which the chip interprets as "channel B
-	 * muted", leaving only the left half of a dual-link panel driven.
-	 */
-	if (ctx->lvds_dual_link) {
-		le16val = cpu_to_le16(mode->hdisplay);
-		regmap_bulk_write(ctx->regmap, REG_VID_CHB_ACTIVE_LINE_LENGTH_LOW,
-				  &le16val, 2);
-		le16val = cpu_to_le16(mode->vdisplay);
-		regmap_bulk_write(ctx->regmap, REG_VID_CHB_VERTICAL_DISPLAY_SIZE_LOW,
-				  &le16val, 2);
-		le16val = cpu_to_le16(32 + 1);
-		regmap_bulk_write(ctx->regmap, REG_VID_CHB_SYNC_DELAY_LOW, &le16val, 2);
-		le16val = cpu_to_le16(mode->hsync_end - mode->hsync_start);
-		regmap_bulk_write(ctx->regmap, REG_VID_CHB_HSYNC_PULSE_WIDTH_LOW,
-				  &le16val, 2);
-		le16val = cpu_to_le16(mode->vsync_end - mode->vsync_start);
-		regmap_bulk_write(ctx->regmap, REG_VID_CHB_VSYNC_PULSE_WIDTH_LOW,
-				  &le16val, 2);
-		regmap_write(ctx->regmap, REG_VID_CHB_HORIZONTAL_BACK_PORCH,
-			     mode->htotal - mode->hsync_end);
-		regmap_write(ctx->regmap, REG_VID_CHB_VERTICAL_BACK_PORCH,
-			     mode->vtotal - mode->vsync_end);
-		regmap_write(ctx->regmap, REG_VID_CHB_HORIZONTAL_FRONT_PORCH,
-			     mode->hsync_start - mode->hdisplay);
-		regmap_write(ctx->regmap, REG_VID_CHB_VERTICAL_FRONT_PORCH,
-			     mode->vsync_start - mode->vdisplay);
-	}
-
-	/*
-	 * PLL enable + poll for lock moved to atomic_enable below.
-	 * Rationale: NXP sec-dsim only starts its DSI link clock in its own
-	 * atomic_enable() callback, while the mainline 6.6 sn65dsi83 driver
-	 * previously enabled the PLL here in atomic_pre_enable() and polled
-	 * for lock. With sec-dsim upstream there is no DSI link clock yet at
-	 * pre_enable time, so the PLL never locks and we time out (-110).
-	 * The 5.10 sn65dsi83 driver had this entire enable sequence (including
-	 * PLL enable) in atomic_enable() — by that time sec-dsim's own
-	 * atomic_enable has already programmed and started the DSIM PLL.
-	 * Mirror that behavior here.
-	 */
-}
-
-static void sn65dsi83_atomic_enable(struct drm_bridge *bridge,
-				    struct drm_bridge_state *old_bridge_state)
-{
-	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
-	unsigned int pval;
-	int ret;
-
-	/* Enable PLL (DSI link clock from sec-dsim is up by now). */
+	/* Enable PLL */
 	regmap_write(ctx->regmap, REG_RC_PLL_EN, REG_RC_PLL_EN_PLL_EN);
 	usleep_range(3000, 4000);
 	ret = regmap_read_poll_timeout(ctx->regmap, REG_RC_LVDS_PLL, pval,
@@ -614,6 +523,7 @@ static void sn65dsi83_atomic_enable(struct drm_bridge *bridge,
 				       1000, 100000);
 	if (ret) {
 		dev_err(ctx->dev, "failed to lock PLL, ret=%i\n", ret);
+		/* On failure, disable PLL again and exit. */
 		regmap_write(ctx->regmap, REG_RC_PLL_EN, 0x00);
 		return;
 	}
@@ -621,46 +531,29 @@ static void sn65dsi83_atomic_enable(struct drm_bridge *bridge,
 	/* Trigger reset after CSR register update. */
 	regmap_write(ctx->regmap, REG_RC_RESET, REG_RC_RESET_SOFT_RESET);
 
-	/* Wait for 10ms after soft reset as specified in datasheet */
-	usleep_range(10000, 12000);
-
 	/* Clear all errors that got asserted during initialization. */
 	regmap_read(ctx->regmap, REG_IRQ_STAT, &pval);
 	regmap_write(ctx->regmap, REG_IRQ_STAT, pval);
-
-	/* Wait for 1ms and check for errors in status register */
-	usleep_range(1000, 1100);
-	regmap_read(ctx->regmap, REG_IRQ_STAT, &pval);
-	if (pval)
-		dev_err(ctx->dev, "Unexpected link status 0x%02x\n", pval);
-
-	/* DIAG: dump key bridge config registers */
-	{
-		unsigned int lvds_fmt = 0, lvds_pll = 0, dsi_clk = 0, dsi_lane = 0;
-		regmap_read(ctx->regmap, REG_LVDS_FMT, &lvds_fmt);
-		regmap_read(ctx->regmap, REG_RC_LVDS_PLL, &lvds_pll);
-		regmap_read(ctx->regmap, REG_DSI_CLK, &dsi_clk);
-		regmap_read(ctx->regmap, REG_DSI_LANE, &dsi_lane);
-		dev_info(ctx->dev, "DIAG post-enable IRQ_STAT=0x%02x LVDS_FMT=0x%02x LVDS_PLL=0x%02x DSI_CLK=0x%02x DSI_LANE=0x%02x\n",
-			 pval, lvds_fmt, lvds_pll, dsi_clk, dsi_lane);
-	}
 }
 
 static void sn65dsi83_atomic_disable(struct drm_bridge *bridge,
 				     struct drm_bridge_state *old_bridge_state)
 {
 	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
-	int ret;
 
-	/* Put the chip in reset, pull EN line low, and assure 10ms reset low timing. */
+	/* Clear reset, disable PLL */
+	regmap_write(ctx->regmap, REG_RC_RESET, 0x00);
+	regmap_write(ctx->regmap, REG_RC_PLL_EN, 0x00);
+}
+
+static void sn65dsi83_atomic_post_disable(struct drm_bridge *bridge,
+					  struct drm_bridge_state *old_bridge_state)
+{
+	struct sn65dsi83 *ctx = bridge_to_sn65dsi83(bridge);
+
+	/* Put the chip in reset, pull EN line low. */
 	gpiod_set_value_cansleep(ctx->enable_gpio, 0);
 	usleep_range(10000, 11000);
-
-	ret = regulator_disable(ctx->vcc);
-	if (ret)
-		dev_err(ctx->dev, "Failed to disable vcc: %d\n", ret);
-
-	regcache_mark_dirty(ctx->regmap);
 }
 
 static enum drm_mode_status
@@ -705,10 +598,10 @@ sn65dsi83_atomic_get_input_bus_fmts(struct drm_bridge *bridge,
 
 static const struct drm_bridge_funcs sn65dsi83_funcs = {
 	.attach			= sn65dsi83_attach,
-	.detach			= sn65dsi83_detach,
-	.atomic_enable		= sn65dsi83_atomic_enable,
 	.atomic_pre_enable	= sn65dsi83_atomic_pre_enable,
+	.atomic_enable		= sn65dsi83_atomic_enable,
 	.atomic_disable		= sn65dsi83_atomic_disable,
+	.atomic_post_disable	= sn65dsi83_atomic_post_disable,
 	.mode_valid		= sn65dsi83_mode_valid,
 
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
@@ -721,13 +614,26 @@ static int sn65dsi83_parse_dt(struct sn65dsi83 *ctx, enum sn65dsi83_model model)
 {
 	struct drm_bridge *panel_bridge;
 	struct device *dev = ctx->dev;
+	struct device_node *endpoint;
+	struct drm_panel *panel;
+	int ret;
+
+	endpoint = of_graph_get_endpoint_by_regs(dev->of_node, 0, 0);
+	ctx->dsi_lanes = of_property_count_u32_elems(endpoint, "data-lanes");
+	ctx->host_node = of_graph_get_remote_port_parent(endpoint);
+	of_node_put(endpoint);
+
+	if (ctx->dsi_lanes < 0 || ctx->dsi_lanes > 4)
+		return -EINVAL;
+	if (!ctx->host_node)
+		return -ENODEV;
 
 	ctx->lvds_dual_link = false;
 	ctx->lvds_dual_link_even_odd_swap = false;
 	if (model != MODEL_SN65DSI83) {
 		struct device_node *port2, *port3;
 		int dual_link;
-
+		
 		port2 = of_graph_get_port_by_id(dev->of_node, 2);
 		port3 = of_graph_get_port_by_id(dev->of_node, 3);
 		dual_link = drm_of_lvds_get_dual_link_pixel_order(port2, port3);
@@ -743,93 +649,25 @@ static int sn65dsi83_parse_dt(struct sn65dsi83 *ctx, enum sn65dsi83_model model)
 			/* Even pixels to LVDS Channel A, odd pixels to B */
 			ctx->lvds_dual_link_even_odd_swap = true;
 		}
-
+		
+		if(f_sn65dsi84_dual_lvds)
+		{
+			printk("DUAL LVDS mode detected\n");
+			ctx->lvds_dual_link = true;
+			ctx->lvds_dual_link_even_odd_swap = false;
+		}
 	}
 
-	/*
-	 * Allow the panel driver to force dual-link or single-link via the
-	 * global override flag. Hymatek's eX7xxM family shares one DT
-	 * (imx8mm_us04.dtsi) for all panels, with canonical port@3 +
-	 * dual-lvds-{odd,even}-pixels topology that the bridge driver would
-	 * otherwise interpret as "always dual-link". For single-link panels
-	 * in the family (10.1", 7"), panel-simple keeps f_sn65dsi84_dual_lvds=0
-	 * and we override the DT-derived dual-link to force single-link.
-	 */
-	if (f_sn65dsi84_dual_lvds) {
-		dev_info(dev, "DUAL LVDS forced by panel driver (model=%d)\n",
-			 model);
-		ctx->lvds_dual_link = true;
-		ctx->lvds_dual_link_even_odd_swap = false;
-	} else if (model != MODEL_SN65DSI83) {
-		dev_info(dev, "Single-link forced (panel driver did not request dual-link)\n");
-		ctx->lvds_dual_link = false;
-		ctx->lvds_dual_link_even_odd_swap = false;
+	ret = drm_of_find_panel_or_bridge(dev->of_node, 2, 0, &panel, &panel_bridge);
+	if (ret < 0)
+		return ret;
+	if (panel) {
+		panel_bridge = devm_drm_panel_bridge_add(dev, panel);
+		if (IS_ERR(panel_bridge))
+			return PTR_ERR(panel_bridge);
 	}
-
-	panel_bridge = devm_drm_of_get_bridge(dev, dev->of_node, 2, 0);
-	if (IS_ERR(panel_bridge))
-		return PTR_ERR(panel_bridge);
 
 	ctx->panel_bridge = panel_bridge;
-
-	ctx->vcc = devm_regulator_get(dev, "vcc");
-	if (IS_ERR(ctx->vcc))
-		return dev_err_probe(dev, PTR_ERR(ctx->vcc),
-				     "Failed to get supply 'vcc'\n");
-
-	return 0;
-}
-
-static int sn65dsi83_host_attach(struct sn65dsi83 *ctx)
-{
-	struct device *dev = ctx->dev;
-	struct device_node *host_node;
-	struct device_node *endpoint;
-	struct mipi_dsi_device *dsi;
-	struct mipi_dsi_host *host;
-	const struct mipi_dsi_device_info info = {
-		.type = "sn65dsi83",
-		.channel = 0,
-		.node = NULL,
-	};
-	int dsi_lanes, ret;
-
-	endpoint = of_graph_get_endpoint_by_regs(dev->of_node, 0, -1);
-	dsi_lanes = drm_of_get_data_lanes_count(endpoint, 1, 4);
-	host_node = of_graph_get_remote_port_parent(endpoint);
-	host = of_find_mipi_dsi_host_by_node(host_node);
-	of_node_put(host_node);
-	of_node_put(endpoint);
-
-	if (!host)
-		return -EPROBE_DEFER;
-
-	if (dsi_lanes < 0)
-		return dsi_lanes;
-
-	dsi = devm_mipi_dsi_device_register_full(dev, host, &info);
-	if (IS_ERR(dsi))
-		return dev_err_probe(dev, PTR_ERR(dsi),
-				     "failed to create dsi device\n");
-
-	ctx->dsi = dsi;
-
-	dsi->lanes = dsi_lanes;
-	dsi->format = MIPI_DSI_FMT_RGB888;
-	/*
-	 * 6.6 mainline added VIDEO_NO_HFP|HBP|HSA + NO_EOT_PACKET flags but
-	 * those tell sec-dsim on i.MX8MM to drop the standard horizontal
-	 * blanking packets, which confuses the Innolux G215HVN01 panel
-	 * downstream of the bridge. linux-us03 5.10 uses just VIDEO|BURST
-	 * and the panel locks fine — mirror that.
-	 */
-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST;
-
-	ret = devm_mipi_dsi_attach(dev, dsi);
-	if (ret < 0) {
-		dev_err(dev, "failed to attach dsi to host: %d\n", ret);
-		return ret;
-	}
 
 	return 0;
 }
@@ -855,41 +693,28 @@ static int sn65dsi83_probe(struct i2c_client *client)
 		model = id->driver_data;
 	}
 
-	/* Put the chip in reset, pull EN line low, and assure 10ms reset low timing. */
-	ctx->enable_gpio = devm_gpiod_get_optional(ctx->dev, "enable",
-						   GPIOD_OUT_LOW);
+	ctx->enable_gpio = devm_gpiod_get(ctx->dev, "enable", GPIOD_OUT_LOW);
 	if (IS_ERR(ctx->enable_gpio))
-		return dev_err_probe(dev, PTR_ERR(ctx->enable_gpio), "failed to get enable GPIO\n");
+		return PTR_ERR(ctx->enable_gpio);
 
-	ctx->envdd_gpio = devm_gpiod_get(ctx->dev, "envdd",
-							GPIOD_OUT_LOW);
+	ctx->envdd_gpio = devm_gpiod_get(ctx->dev, "envdd", GPIOD_OUT_LOW);
 	if (IS_ERR(ctx->envdd_gpio))
-		return dev_err_probe(dev, PTR_ERR(ctx->envdd_gpio), "failed to get envdd GPIO\n");	
-
-	usleep_range(10000, 11000);
-
+		return PTR_ERR(ctx->envdd_gpio);
+	
 	ret = sn65dsi83_parse_dt(ctx, model);
 	if (ret)
 		return ret;
 
 	ctx->regmap = devm_regmap_init_i2c(client, &sn65dsi83_regmap_config);
 	if (IS_ERR(ctx->regmap))
-		return dev_err_probe(dev, PTR_ERR(ctx->regmap), "failed to get regmap\n");
+		return PTR_ERR(ctx->regmap);
 
 	dev_set_drvdata(dev, ctx);
 	i2c_set_clientdata(client, ctx);
 
 	ctx->bridge.funcs = &sn65dsi83_funcs;
 	ctx->bridge.of_node = dev->of_node;
-	ctx->bridge.pre_enable_prev_first = true;
 	drm_bridge_add(&ctx->bridge);
-
-	/*
-	 * Do NOT call sn65dsi83_host_attach here. It is deferred to the bridge
-	 * attach callback so the upstream sec-dsim DSI host has had a chance
-	 * to mipi_dsi_host_register and set dsim->next before mipi_dsi_attach
-	 * is called. See sn65dsi83_attach() above for the rationale.
-	 */
 
 	return 0;
 }
@@ -898,7 +723,10 @@ static void sn65dsi83_remove(struct i2c_client *client)
 {
 	struct sn65dsi83 *ctx = i2c_get_clientdata(client);
 
+	mipi_dsi_detach(ctx->dsi);
+	mipi_dsi_device_unregister(ctx->dsi);
 	drm_bridge_remove(&ctx->bridge);
+	of_node_put(ctx->host_node);
 }
 
 static struct i2c_device_id sn65dsi83_id[] = {
